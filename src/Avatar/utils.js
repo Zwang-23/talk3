@@ -104,54 +104,9 @@ export function computeWordsFromAlignment(timepoints) {
   return { words, wtimes, wdurations };
 }
 
-let mediaRecorder, recordedChunks = [];
-export let isRecordingMode = false;
 
-export function startRecording(audioStream) {
-  const canvas = document.querySelector('#scene-container canvas');
-  if (!canvas) return console.error('No canvas found');
-  const canvasStream = canvas.captureStream(30);                // video
-  const tracks = [
-    ...canvasStream.getVideoTracks(),
-    ...audioStream.getAudioTracks()                              // audio
-  ];
-  const mixed = new MediaStream(tracks);
-  recordedChunks = [];
-  mediaRecorder = new MediaRecorder(mixed, {
-    mimeType: 'video/webm;codecs=vp8,opus'
-  });
-  mediaRecorder.ondataavailable = e => {
-    if (e.data.size) recordedChunks.push(e.data);
-  };
-  mediaRecorder.start();
-  console.log('Recording started');
-}
 
-export function stopRecording() {
-  if (!mediaRecorder || mediaRecorder.state === 'inactive') return;
-  mediaRecorder.onstop = () => {
-    const blob = new Blob(recordedChunks, { type: 'video/webm' });
-    const url  = URL.createObjectURL(blob);
-    const a    = document.createElement('a');
-    a.style.display = 'none';
-    a.href        = url;
-    a.download    = `avatar_${Date.now()}.webm`;
-    document.body.appendChild(a);
-    a.click();
-    setTimeout(() => {
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-    }, 100);
-    console.log('Recording saved');
-  };
-  mediaRecorder.stop();
-  console.log('Recording stopped');
-}
 
-export function toggleRecordingMode() {
-  isRecordingMode = !isRecordingMode;
-  return isRecordingMode;
-}
 
 
 export function createAudioBufferFromPCM(audioContext, pcmData, sampleRate, numChannels) {

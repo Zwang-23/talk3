@@ -2,7 +2,7 @@ import { TalkingHead } from './modules/talkinghead.mjs';
 import { initializeChat } from './chat.js';
 import { setupTTS } from './tts.js';
 import * as config from './config.js';
-import { showErrorOverlay, toggleRecordingMode } from './utils.js';
+import { showErrorOverlay } from './utils.js';
 
 
 let talkingHeadInstance;
@@ -11,12 +11,6 @@ let audioContext;
 export function init() {
   const modelSelector = document.getElementById('model-selector');
   modelSelector.addEventListener('change', (e) => resetConversation(e.target.value));
-
-  const recBtn = document.getElementById('record-video');
-  recBtn.addEventListener('click', () => {
-    const mode = toggleRecordingMode();
-    recBtn.textContent = mode ? 'Stop Recording' : 'Record Video';
-  });
 
   // Initialize with default model
   const initialModel = modelSelector?.value || 'pro.glb';

@@ -34,7 +34,7 @@ const Avatar = () => {
 
       {/* Collapsible Introduction Section */}
       <div id="intro-section">
-        {"Hi!"}
+        {"welcome"}
       </div>
 
       <div className="container">
@@ -58,7 +58,7 @@ const Avatar = () => {
         
           <div className="controls">
             <button id="mode-toggle">ChatGPT Mode</button>
-            <button id="record-video">Record Video</button>
+            
             <button id="save-log">Save Log</button>
           </div>
         </div>
