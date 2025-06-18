@@ -1,7 +1,7 @@
 # backend/app.py
 """
 Unified Flask backend that consolidates the original Flask APIs *and* the Node.js
-`server.js` functionality into a single service listening on **port 5000**.
+`server.js` functionality into a single service listening on **port 5000**.
 
 Key features now included
 -------------------------
@@ -10,18 +10,18 @@ Key features now included
   * `/avatar/api/chat` – keeps the personalised résumé logic.
   * `/chat` – a lightweight wrapper mirroring the Node.js version.
 * **Text‑to‑speech (ElevenLabs) support**
-  * **HTTP** `/tts-proxy` → streams via ElevenLabs REST endpoint.
-  * **WebSocket** `/tts‑ws` → full‑duplex proxy to ElevenLabs WS endpoint (or any
-    custom URL via `TTS_WS_URL`).
+  * **HTTP** `/tts-proxy` → streams via ElevenLabs REST endpoint.
+  * **WebSocket** `/tts‑ws` → full‑duplex proxy to ElevenLabs WS endpoint (or any
+    custom URL via `TTS_WS_URL`).
 * **Static assets** – serves the old *public/models* and *public/modules* folders
   with the same headers/caching semantics that `server.js` used.
-* **Single process, no extra ports** – just run `python app.py` and everything is
+* **Single process, no extra ports** – just run `python app.py` and everything is
   available on <http://localhost:5000> / `ws://localhost:5000/tts-ws`.
 
 Environment variables
 ---------------------
 * `OPENAI_API_KEY` – OpenAI credentials (required).
-* `ELEVENLABS_API_KEY` & `VOICE_ID` – for ElevenLabs TTS.
+* `ELEVENLABS_API_KEY` & `VOICE_ID` – for ElevenLabs TTS.
 * `TTS_WS_URL` – (optional) override for the ElevenLabs WebSocket URL.
 * `SECRET_KEY` – Flask session secret.
 
@@ -46,7 +46,7 @@ import numpy as np
 import requests
 import websocket  # websocket‑client
 from dotenv import load_dotenv
-from flask import (Flask, jsonify, request, send_from_directory, session)
+from flask import (Flask, jsonify, request, send_from_directory, session, abort)
 from flask_cors import CORS
 from flask_sock import Sock
 from openai import OpenAI
@@ -65,15 +65,24 @@ AVATAR_DIR = os.path.join(BASE_DIR, "src", "Avatar")
 MODELS_DIR = os.path.join(PUBLIC_DIR, "models")
 MODULES_DIR = os.path.join(PUBLIC_DIR, "modules")
 
-app = Flask(__name__, static_folder=FRONTEND_BUILD, static_url_path="/")
+app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "default-secret-key")
 app.permanent_session_lifetime = timedelta(hours=4)
 
-CORS(app)
+app.config.update(
+    SESSION_COOKIE_SAMESITE="None",   # allow cross-site
+    SESSION_COOKIE_SECURE= True     # set **True** in prod (HTTPS)
+)
+
+CORS(
+    app,
+    origins="http://localhost:3000",   # exact origin, not "*", so cookies still work
+    supports_credentials=True,
+)
 sock = Sock(app)
 
 # OpenAI client
-openai_api_key = os.environ["OPENAI_API_KEY"]
+openai_api_key = os.getenv("OPENAI_API_KEY")
 openai_client = OpenAI(api_key=openai_api_key)
 
 # ---------------------------------------------------------------------------
@@ -157,7 +166,7 @@ def send_static_with_headers(directory: str, filename: str, headers: dict):
     return response
 
 # ---------------------------------------------------------------------------
-# Face recognition APIs (unchanged)
+# Face recognition APIs (unchanged) - MUST BE BEFORE CATCH-ALL
 # ---------------------------------------------------------------------------
 
 @app.route("/api/recognize", methods=["POST"])
@@ -175,7 +184,8 @@ def recognize():
         matches = face_recognition.compare_faces(known_encodings, enc, tolerance=0.6)
         if True in matches:
             idx = matches.index(True)
-            session.update(user_name=known_names[idx], authenticated=True)  # type: ignore
+            session["user_name"]=known_names[idx]
+            session["authenticated"]=True # type: ignore
             return jsonify({"status": "known", "name": known_names[idx]})
 
     return jsonify({"status": "unknown", "message": "Unknown user detected"})
@@ -210,10 +220,18 @@ def signup():
         known_encodings.append(encodings[0])
         known_resumes.append(file_path)
 
-        session.update(user_name=name, authenticated=True)  # type: ignore
+        session["user_name"]=name 
+        session[authenticated]=True  # type: ignore
         return jsonify({"status": "success", "name": name})
     except Exception as exc:
         return jsonify({"status": "error", "message": str(exc)}), 500
+    
+
+@app.route('/api/username', methods=['GET'])
+def get_username():
+    if not session.get("authenticated") or "user_name" not in session:
+        return jsonify({"error": "Not authenticated"}), 401
+    return jsonify({"name": session["user_name"]})
 
 
 @app.route("/api/resume/<path:filename>")
@@ -221,7 +239,7 @@ def download_resume(filename):
     return send_from_directory(app.config["UPLOAD_FOLDER"], filename)
 
 # ---------------------------------------------------------------------------
-# Chat endpoints
+# Chat endpoints - MUST BE BEFORE CATCH-ALL
 # ---------------------------------------------------------------------------
 
 @app.route("/avatar/api/chat", methods=["POST"])
@@ -274,7 +292,7 @@ def simple_chat():
     return jsonify({"response": assistant})
 
 # ---------------------------------------------------------------------------
-# ElevenLabs TTS – HTTP proxy & WS bridge
+# ElevenLabs TTS – HTTP proxy & WS bridge - MUST BE BEFORE CATCH-ALL
 # ---------------------------------------------------------------------------
 
 
@@ -348,7 +366,7 @@ def tts_ws_proxy(ws):
     threading.Thread(target=_tts_to_client, daemon=True).start()
 
 # ---------------------------------------------------------------------------
-# Static asset routes – mirrors Node.js behaviour
+# Static asset routes – mirrors Node.js behaviour - MUST BE BEFORE CATCH-ALL
 # ---------------------------------------------------------------------------
 
 @app.route("/models/<path:filename>")
@@ -380,15 +398,20 @@ def serve_modules(filename):
 def serve_public(filename):
     return send_from_directory(PUBLIC_DIR, filename)
 
-
 # ---------------------------------------------------------------------------
-# React SPA fallback (unchanged)
+# React SPA fallback - MUST BE LAST TO AVOID INTERCEPTING API ROUTES
 # ---------------------------------------------------------------------------
 
 @app.route("/", defaults={"path": ""})
 @app.route("/<path:path>")
 def catch_all(path):
-    # Allow special prefixes to reach earlier routes first
+    # IMPORTANT: Let /api/* routes hit your real endpoints FIRST
+    # This catch-all should only handle non-API routes
+    if path.startswith("api/"):
+        print(f"API route {path} reached catch-all - this shouldn't happen!")
+        return abort(404)
+
+    # Allow special prefixes first…
     if path.startswith("models/") or path.startswith("modules/"):
         return app.send_static_file(path)
 
@@ -396,13 +419,34 @@ def catch_all(path):
     if path and os.path.exists(full) and not os.path.isdir(full):
         return send_from_directory(FRONTEND_BUILD, path)
 
-    index = os.path.join(FRONTEND_BUILD, "index.html")
-    return send_from_directory(FRONTEND_BUILD, "index.html") if os.path.exists(index) else ("Not Found", 404)
+    return send_from_directory(FRONTEND_BUILD, "index.html")
 
+# ---------------------------------------------------------------------------
+# Debug route to check server status
+# ---------------------------------------------------------------------------
+
+@app.route("/api/health")
+def health_check():
+    """Simple health check endpoint."""
+    return jsonify({
+        "status": "healthy",
+        "session": dict(session),
+        "authenticated": session.get("authenticated", False)
+    })
 
 # ---------------------------------------------------------------------------
 # Run
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
+    print("Starting Flask server on http://localhost:5000")
+    print("Available API endpoints:")
+    print("  GET  /api/health")
+    print("  GET  /api/username") 
+    print("  POST /api/recognize")
+    print("  POST /api/signup")
+    print("  POST /chat")
+    print("  POST /avatar/api/chat")
+    print("  POST /tts-proxy")
+    print("  WS   /tts-ws")
     app.run(debug=True, port=5000)
