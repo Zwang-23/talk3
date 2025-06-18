@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="stylesheet" href="styles.css" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <title>3D Talking Avatar</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body>
+  <!-- JavaScript Disabled Warning -->
+  <noscript>
+    <div>
+      <div>
+        <h1 class="text-2xl font-bold mb-2">JavaScript Required</h1>
+        <p>Please enable JavaScript to use the 3D assistant.</p>
+      </div>
+    </div>
+  </noscript>
+
+  <!-- Header -->
+  <header>3D Talking Avatar</header>
+
+  <!-- Collapsible Introduction Section -->
+  <div id="intro-section">
+    <button id="toggle-intro" aria-expanded="true">Hide Introduction</button>
+    <div id="intro-content">
+      <h2>Welcome to the 3D Talking Avatar</h2>
+      <p>
+        This web application allows you to interact with a 3D avatar powered by text-to-speech technology. Select a model, type your message, and watch the avatar speak your text in real-time. You can also record the avatar's animation and save interaction logs for later review.
+      </p>
+      <h3>Button Functions</h3>
+      <ul>
+        <li><strong>ChatGPT Mode:</strong> Toggles between direct speech mode and a ChatGPT-like conversational mode. In direct mode, the avatar speaks exactly what you type. In ChatGPT mode, the app processes your input for more natural responses.</li>
+        <li><strong>Record Video:</strong> Toggles video recording of the avatar. When active, it records the avatar's animation and audio, saving it as a downloadable video file (e.g., avatar_[timestamp].webm).</li>
+        <li><strong>Save Log:</strong> Downloads a log of your chat interactions, useful for debugging and reviewing past conversations with the avatar.</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="container">
+    <!-- Column 1: Scene + Selector -->
+    <div class="scene-col">
+      <div id="scene-container"></div>
+      <select id="model-selector" aria-label="Select 3D model">
+        <option value="pro.glb">Default model</option>
+        <option value="ProfAbed_BlackTshirt.glb">Prof Abed (Black T-shirt)</option>
+        <option value="ProfAbed_suit.glb">Prof Abed (Suit)</option>
+      </select>
+      
+    </div>
+    <!-- Column 2: Chat + Input -->
+    <div class="chat-col">
+      <div id="chat-messages"></div>
+      <div class="chat-input">
+        <textarea id="user-input" placeholder="Type your message"></textarea>
+        <button id="send-button">Send</button>
+      </div>
+    
+  
+      <div class="controls">
+        <button id="mode-toggle">ChatGPT Mode</button>
+        <button id="record-video">Record Video</button>
+        <button id="save-log">Save Log</button>
+      </div>
+    </div>
+  </div>
+  <div id="start-overlay">
+    <h2>Welcome to 3D Talking Avatar</h2>
+    <p>Click below to start interacting with the avatar.</p>
+    <button id="start-button">Start</button>
+  </div>
+  <div id="loading-overlay">
+    <div class="loading-spinner"></div>
+    <p>Loading AI Assistant...</p>
+  </div>
+  <div id="processing-overlay">
+      <div class="loading-spinner"></div>
+      <p>Processing speech…</p>
+  </div>
+
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.163.0/build/three.module.min.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.163.0/examples/jsm/"
+    }
+  }
+  </script>
+
+  <script type="module" src="main.js"></script>
+</body>
+</html>
