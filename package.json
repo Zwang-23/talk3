@@ -49,6 +49,5 @@
     "@craco/craco": "^7.1.0",
     "concurrently": "^9.1.2",
     "react-app-rewired": "^2.2.1"
-  },
-  "proxy": "http://localhost:3001"
+  }
 }

@@ -1,10 +1,15 @@
 import { showErrorOverlay, appendMessage } from './utils.js';
- // Tracks current mode: false for ChatGPT, true for Direct Speak
-// --- Global State ---
+
+// Tracks current mode: false for ChatGPT, true for Direct Speak
 export let isDirectSpeakMode = false;
+
+// Base URL for the API: in dev this will hit localhost:5000,
+// in prod override by setting REACT_APP_API_BASE_URL
+const API_BASE_URL = process.env.REACT_APP_API_BASE_URL || 'http://localhost:5000';
+
 export async function sendChatMessage(message) {
   try {
-    const response = await fetch('/chat', {
+    const response = await fetch(`${API_BASE_URL}/chat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ message })
@@ -17,35 +22,34 @@ export async function sendChatMessage(message) {
     return "Sorry, I couldn't get a response.";
   }
 }
+
 function setupToggleListener(toggleElement) {
   if (!toggleElement) {
     console.error("Error: Toggle element not found");
     return;
   }
-    // Clone the element to remove existing listeners
+  // Clone the element to remove existing listeners
   const newToggle = toggleElement.cloneNode(true);
   newToggle.id = toggleElement.id;
   newToggle.className = toggleElement.className;
   toggleElement.parentNode.replaceChild(newToggle, toggleElement);
 
   newToggle.addEventListener('click', () => {
-    isDirectSpeakMode = !isDirectSpeakMode; // Toggle mode
-    newToggle.textContent = isDirectSpeakMode ? 'Direct Speak Mode' : 'ChatGPT Mode'; // Update button text
-    console.log("DEBUG: Mode switched to", isDirectSpeakMode ? 'Direct Speak' : 'ChatGPT');
-    });
-  }
+    isDirectSpeakMode = !isDirectSpeakMode;
+    newToggle.textContent = isDirectSpeakMode
+      ? 'Direct Speak Mode'
+      : 'ChatGPT Mode';
+  });
+}
+
 // --- Core Functions ---
 export function initializeChat({ speakText }) {
   const input = document.getElementById('user-input');
   let sendButton = document.getElementById('send-button');
   const toggleMode = document.getElementById('mode-toggle');
-  
-  console.log('DEBUG: DOM state - user-input:', !!input, 
-              'send-button:', !!sendButton, 
-              'mode-toggle:', !!toggleMode);
-  console.log("DEBUG: Header content:", document.querySelector('header')?.innerHTML || "Header not found");
+
   if (!input || !sendButton || !toggleMode) {
-    console.error("Error: Missing required chat interface elements (user-input, send-button, or mode-toggle)");
+    console.error("Error: Missing required chat interface elements");
     return;
   }
   if (!speakText) {
@@ -64,27 +68,25 @@ export function initializeChat({ speakText }) {
 
   sendButton.addEventListener('click', async () => {
     const message = input.value.trim();
-    if (message) {
-      console.log("User message:", message);
-      appendMessage('user', message);
-      input.value = '';
-      try {
-        if (isDirectSpeakMode) {
-          appendMessage('assistant', message);
-          speakText(message); // Likely line 82, causing error
-        } else {
-          const assistantReply = await sendChatMessage(message);
-          console.log("Assistant reply:", assistantReply); // Line ~80
-          appendMessage('assistant', assistantReply);
-          speakText(assistantReply); // Or here, line 82
-        }
-      } catch (error) {
-        showErrorOverlay('Error processing message');
+    if (!message) return;
+
+    appendMessage('user', message);
+    input.value = '';
+    try {
+      if (isDirectSpeakMode) {
+        appendMessage('assistant', message);
+        speakText(message);
+      } else {
+        const assistantReply = await sendChatMessage(message);
+        appendMessage('assistant', assistantReply);
+        speakText(assistantReply);
       }
+    } catch {
+      showErrorOverlay('Error processing message');
     }
   });
 
-  input.addEventListener('keypress', (e) => {
+  input.addEventListener('keypress', e => {
     if (e.key === 'Enter') sendButton.click();
   });
 }

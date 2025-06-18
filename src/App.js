@@ -15,9 +15,7 @@ function App() {
 
   // Get API base URL
   const getApiBase = () => {
-    return process.env.NODE_ENV === 'production' 
-      ? ''  // Use relative path in production
-      : 'http://localhost:5000';  // Use full URL in development
+    return process.env.REACT_APP_API_BASE_URL || 'http://localhost:5000' // Use full URL in development
   };
 
   // Cleanup on unmount

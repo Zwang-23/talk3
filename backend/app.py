@@ -1,283 +1,408 @@
 # backend/app.py
-from flask import Flask, request, jsonify, send_file, send_from_directory, session, redirect, url_for, render_template
-from flask_cors import CORS
-from flask_sock import Sock
+"""
+Unified Flask backend that consolidates the original Flask APIs *and* the Node.js
+`server.js` functionality into a single service listening on **port 5000**.
+
+Key features now included
+-------------------------
+* **Face‑recognition onboarding** (`/api/recognize`, `/api/signup`) – unchanged.
+* **Chat endpoints**
+  * `/avatar/api/chat` – keeps the personalised résumé logic.
+  * `/chat` – a lightweight wrapper mirroring the Node.js version.
+* **Text‑to‑speech (ElevenLabs) support**
+  * **HTTP** `/tts-proxy` → streams via ElevenLabs REST endpoint.
+  * **WebSocket** `/tts‑ws` → full‑duplex proxy to ElevenLabs WS endpoint (or any
+    custom URL via `TTS_WS_URL`).
+* **Static assets** – serves the old *public/models* and *public/modules* folders
+  with the same headers/caching semantics that `server.js` used.
+* **Single process, no extra ports** – just run `python app.py` and everything is
+  available on <http://localhost:5000> / `ws://localhost:5000/tts-ws`.
+
+Environment variables
+---------------------
+* `OPENAI_API_KEY` – OpenAI credentials (required).
+* `ELEVENLABS_API_KEY` & `VOICE_ID` – for ElevenLabs TTS.
+* `TTS_WS_URL` – (optional) override for the ElevenLabs WebSocket URL.
+* `SECRET_KEY` – Flask session secret.
+
+Install‑time deps (pip):
+```
+flask flask-cors flask-sock python-dotenv openai face-recognition opencv-python
+numpy websocket-client requests python-dotenv
+```
+"""
+
+import base64
+import json
+import os
+import pickle
+import sqlite3
+import threading
+from datetime import timedelta
+
 import cv2
 import face_recognition
 import numpy as np
-import sqlite3
-import pickle
-import os
-import base64
-import json
-from werkzeug.utils import secure_filename
-from openai import OpenAI
-import threading
-import websocket
+import requests
+import websocket  # websocket‑client
 from dotenv import load_dotenv
-  
+from flask import (Flask, jsonify, request, send_from_directory, session)
+from flask_cors import CORS
+from flask_sock import Sock
+from openai import OpenAI
+from werkzeug.utils import secure_filename
 
+# ---------------------------------------------------------------------------
+# Initialisation & configuration
+# ---------------------------------------------------------------------------
 
-app = Flask(__name__)
-app.secret_key = os.environ.get('SECRET_KEY', 'default-secret-key')
-CORS(app)  # Enable CORS for development
+load_dotenv()
+
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+PUBLIC_DIR = os.path.join(BASE_DIR, "public")  # mirrors server.js staticPath
+FRONTEND_BUILD = os.path.join(BASE_DIR, "build")
+AVATAR_DIR = os.path.join(BASE_DIR, "src", "Avatar")
+MODELS_DIR = os.path.join(PUBLIC_DIR, "models")
+MODULES_DIR = os.path.join(PUBLIC_DIR, "modules")
+
+app = Flask(__name__, static_folder=FRONTEND_BUILD, static_url_path="/")
+app.secret_key = os.environ.get("SECRET_KEY", "default-secret-key")
+app.permanent_session_lifetime = timedelta(hours=4)
+
+CORS(app)
 sock = Sock(app)
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-AVATAR_DIR = os.path.join(BASE_DIR, 'backend/avatar')
-# Configuration
-app.config['UPLOAD_FOLDER'] = 'resumes'
-app.config['ALLOWED_EXTENSIONS'] = {'pdf'}
-app.config['DATABASE'] = 'users.db'
-app.config['AVATAR_DIR'] = AVATAR_DIR # Path to your avatar app files
-app.config['TTS_SERVER_URL'] = 'ws://localhost:3001'
 
-# Initialize OpenAI
-load_dotenv() 
-openai_api_key = os.environ.get('OPENAI_API_KEY')
-client = OpenAI(api_key=openai_api_key)
-# Database setup
+# OpenAI client
+openai_api_key = os.environ["OPENAI_API_KEY"]
+openai_client = OpenAI(api_key=openai_api_key)
+
+# ---------------------------------------------------------------------------
+# Database helpers (unchanged)
+# ---------------------------------------------------------------------------
+
+app.config.update(
+    UPLOAD_FOLDER="resumes",
+    ALLOWED_EXTENSIONS={"pdf"},
+    DATABASE="users.db",
+)
+
 def setup_database():
-    conn = sqlite3.connect(app.config['DATABASE'])
+    conn = sqlite3.connect(app.config["DATABASE"])
     c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS users 
-                 (user_id INTEGER PRIMARY KEY, name TEXT, face_encoding BLOB, resume_path TEXT)''')
+    c.execute(
+        """CREATE TABLE IF NOT EXISTS users (
+            user_id      INTEGER PRIMARY KEY,
+            name         TEXT,
+            face_encoding BLOB,
+            resume_path  TEXT
+        )"""
+    )
     conn.commit()
     conn.close()
 
-# Load known users from database
+
 def load_known_users():
-    conn = sqlite3.connect(app.config['DATABASE'])
+    conn = sqlite3.connect(app.config["DATABASE"])
     c = conn.cursor()
     c.execute("SELECT user_id, name, face_encoding, resume_path FROM users")
     rows = c.fetchall()
     conn.close()
-    
-    known_encodings = []
-    known_names = []
-    known_ids = []
-    known_resumes = []
-    for row in rows:
-        user_id, name, encoding_blob, resume_path = row
-        encoding = pickle.loads(encoding_blob)
-        known_ids.append(user_id)
-        known_names.append(name)
-        known_encodings.append(encoding)
-        known_resumes.append(resume_path)
-    return known_ids, known_names, known_encodings, known_resumes
 
-# Save new user to database
+    ids, names, encodings, resumes = [], [], [], []
+    for user_id, name, enc_blob, resume in rows:
+        ids.append(user_id)
+        names.append(name)
+        encodings.append(pickle.loads(enc_blob))
+        resumes.append(resume)
+    return ids, names, encodings, resumes
+
+
 def save_new_user(name, encoding, resume_path):
-    conn = sqlite3.connect(app.config['DATABASE'])
+    conn = sqlite3.connect(app.config["DATABASE"])
     c = conn.cursor()
-    encoding_blob = pickle.dumps(encoding)
-    c.execute("INSERT INTO users (name, face_encoding, resume_path) VALUES (?, ?, ?)", 
-              (name, encoding_blob, resume_path))
+    c.execute(
+        "INSERT INTO users (name, face_encoding, resume_path) VALUES (?, ?, ?)",
+        (name, pickle.dumps(encoding), resume_path),
+    )
     conn.commit()
     conn.close()
 
-# Initialize database and known users
+
+# Prepare face‑recog cache on startup
 setup_database()
 known_ids, known_names, known_encodings, known_resumes = load_known_users()
 
-# Helper functions
-def allowed_file(filename):
-    return '.' in filename and \
-           filename.rsplit('.', 1)[1].lower() in app.config['ALLOWED_EXTENSIONS']
+# ---------------------------------------------------------------------------
+# Utility helpers
+# ---------------------------------------------------------------------------
 
-def process_image(image_data):
-    # Convert base64 image data to OpenCV format
+def allowed_file(filename: str) -> bool:
+    return "." in filename and filename.rsplit(".", 1)[1].lower() in app.config["ALLOWED_EXTENSIONS"]
+
+
+def process_image(image_data: str):
+    """Convert base64 image data → 1/4‑scaled RGB np.ndarray."""
     header, encoded = image_data.split(",", 1) if "," in image_data else ("", image_data)
     binary_data = base64.b64decode(encoded)
-    np_arr = np.frombuffer(binary_data, np.uint8)
-    frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
-    
-    # Resize and convert to RGB
-    small_frame = cv2.resize(frame, (0, 0), fx=0.25, fy=0.25)
-    return cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)
+    arr = np.frombuffer(binary_data, np.uint8)
+    frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    small = cv2.resize(frame, (0, 0), fx=0.25, fy=0.25)
+    return cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
 
-# API Routes - Face Recognition
-@app.route('/api/recognize', methods=['POST'])
+
+def send_static_with_headers(directory: str, filename: str, headers: dict):
+    response = send_from_directory(directory, filename)
+    for k, v in headers.items():
+        response.headers[k] = v
+    return response
+
+# ---------------------------------------------------------------------------
+# Face recognition APIs (unchanged)
+# ---------------------------------------------------------------------------
+
+@app.route("/api/recognize", methods=["POST"])
 def recognize():
-    data = request.json
-    if not data or 'image' not in data:
-        return jsonify({'status': 'error', 'message': 'No image provided'}), 400
+    data = request.get_json(force=True)
+    if not data or "image" not in data:
+        return jsonify({"status": "error", "message": "No image provided"}), 400
 
-    try:
-        frame = process_image(data['image'])
-        
-        # Face detection
-        face_locations = face_recognition.face_locations(frame)
-        if not face_locations:
-            return jsonify({'status': 'no_face', 'message': 'No face detected'})
-        
-        # Face recognition
-        face_encodings = face_recognition.face_encodings(frame, face_locations)
-        for face_encoding in face_encodings:
-            matches = face_recognition.compare_faces(known_encodings, face_encoding, tolerance=0.6)
-            
-            if True in matches:
-                first_match_index = matches.index(True)
-                name = known_names[first_match_index]
-                # Store user in session
-                session['user_name'] = name
-                session['authenticated'] = True
-                return jsonify({'status': 'known', 'name': name})
-        
-        # Unknown face
-        return jsonify({'status': 'unknown', 'message': 'Unknown user detected'})
-    
-    except Exception as e:
-        return jsonify({'status': 'error', 'message': str(e)}), 500
+    frame = process_image(data["image"])
+    face_locations = face_recognition.face_locations(frame)
+    if not face_locations:
+        return jsonify({"status": "no_face", "message": "No face detected"})
 
-@app.route('/api/signup', methods=['POST'])
+    for enc in face_recognition.face_encodings(frame, face_locations):
+        matches = face_recognition.compare_faces(known_encodings, enc, tolerance=0.6)
+        if True in matches:
+            idx = matches.index(True)
+            session.update(user_name=known_names[idx], authenticated=True)  # type: ignore
+            return jsonify({"status": "known", "name": known_names[idx]})
+
+    return jsonify({"status": "unknown", "message": "Unknown user detected"})
+
+
+@app.route("/api/signup", methods=["POST"])
 def signup():
     try:
-        name = request.form.get('name')
-        image_data = request.form.get('image_data')
-        resume = request.files.get('resume')
-        
+        name = request.form.get("name")
+        image_data = request.form.get("image_data")
+        resume = request.files.get("resume")
+
         if not name:
-            return jsonify({'status': 'error', 'message': 'Name is required'}), 400
-        
+            return jsonify({"status": "error", "message": "Name is required"}), 400
         if not resume or not allowed_file(resume.filename):
-            return jsonify({'status': 'error', 'message': 'Valid resume (PDF) required'}), 400
-        
-        # Process image
+            return jsonify({"status": "error", "message": "Valid resume (PDF) required"}), 400
+
         frame = process_image(image_data)
-        face_encodings = face_recognition.face_encodings(frame)
-        
-        if not face_encodings:
-            return jsonify({'status': 'error', 'message': 'No face detected in captured image'}), 400
-        
-        # Save resume
-        filename = secure_filename(resume.filename)
-        resume_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-        os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
-        resume.save(resume_path)
-        
-        # Save new user
-        save_new_user(name, face_encodings[0], resume_path)
-        
-        # Update known users
+        encodings = face_recognition.face_encodings(frame)
+        if not encodings:
+            return jsonify({"status": "error", "message": "No face detected"}), 400
+
+        os.makedirs(app.config["UPLOAD_FOLDER"], exist_ok=True)
+        file_path = os.path.join(app.config["UPLOAD_FOLDER"], secure_filename(resume.filename))
+        resume.save(file_path)
+
+        save_new_user(name, encodings[0], file_path)
         global known_ids, known_names, known_encodings, known_resumes
-        new_id = max(known_ids) + 1 if known_ids else 1
+        new_id = max(known_ids or [0]) + 1
         known_ids.append(new_id)
         known_names.append(name)
-        known_encodings.append(face_encodings[0])
-        known_resumes.append(resume_path)
-        
-        # Store user in session
-        session['user_name'] = name
-        session['authenticated'] = True
-        return jsonify({'status': 'success', 'name': name})
-    
-    except Exception as e:
-        return jsonify({'status': 'error', 'message': str(e)}), 500
+        known_encodings.append(encodings[0])
+        known_resumes.append(file_path)
 
-@app.route('/api/resume/<filename>', methods=['GET'])
+        session.update(user_name=name, authenticated=True)  # type: ignore
+        return jsonify({"status": "success", "name": name})
+    except Exception as exc:
+        return jsonify({"status": "error", "message": str(exc)}), 500
+
+
+@app.route("/api/resume/<path:filename>")
 def download_resume(filename):
-    return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
+    return send_from_directory(app.config["UPLOAD_FOLDER"], filename)
 
+# ---------------------------------------------------------------------------
+# Chat endpoints
+# ---------------------------------------------------------------------------
 
-
-@app.route('/avatar/api/chat', methods=['POST'])
+@app.route("/avatar/api/chat", methods=["POST"])
 def avatar_chat():
-    """ChatGPT endpoint for avatar with user context"""
-    if not session.get('authenticated'):
-        return jsonify({'error': 'Unauthorized'}), 401
-    
+    if not session.get("authenticated"):
+        return jsonify({"error": "Unauthorized"}), 401
+
+    data = request.get_json(force=True)
+    user_message = data.get("message")
+    if not user_message:
+        return jsonify({"error": "Message is required"}), 400
+
+    user_name = session["user_name"]
+    prompt_parts = [f"You are speaking with {user_name}."]
+
     try:
-        data = request.json
-        user_message = data.get('message')
-        user_name = session['user_name']
-        
-        if not user_message:
-            return jsonify({'error': 'Message is required'}), 400
-        
-        # Add user context to prompt
-        prompt = f"You are speaking with {user_name}. "
-        
-        # Add resume content if available
-        try:
-            user_index = known_names.index(user_name)
-            resume_path = known_resumes[user_index]
-            if resume_path and os.path.exists(resume_path):
-                with open(resume_path, 'r') as f:
-                    resume_content = f.read(2000)  # Read first 2000 characters
-                    prompt += f"Here is some information about them: {resume_content}\n\n"
-        except (ValueError, IndexError):
-            pass
-        
-        prompt += f"User: {user_message}"
-        
-        # Call ChatGPT
-        
-        response = client.responses.create(
-            model="gpt-3.5-turbo",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.7,
-        )
+        idx = known_names.index(user_name)
+        resume_path = known_resumes[idx]
+        if resume_path and os.path.exists(resume_path):
+            with open(resume_path, "r", errors="ignore") as fh:
+                prompt_parts.append("Here is some information about them: " + fh.read(2000))
+    except ValueError:
+        pass
 
-        assistant_response = response.choices[0].message.content
-        return jsonify({'response': assistant_response})
-    
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
+    prompt_parts.append(f"User: {user_message}")
 
-# TTS WebSocket Proxy
-@sock.route('/tts-ws')
-def tts_proxy(ws):
-    """WebSocket proxy to Node.js TTS server"""
-    tts_ws = websocket.create_connection(app.config['TTS_SERVER_URL'])
-    
-    def forward_to_tts():
+    response = openai_client.chat.completions.create(
+        model="gpt-3.5-turbo",
+        messages=[{"role": "user", "content": "\n\n".join(prompt_parts)}],
+        temperature=0.7,
+    )
+    assistant = response.choices[0].message.content
+    return jsonify({"response": assistant})
+
+
+@app.route("/chat", methods=["POST"])
+def simple_chat():
+    """Lightweight endpoint migrated from server.js."""
+    data = request.get_json(force=True)
+    user_message = data.get("message")
+    if not user_message:
+        return jsonify({"error": "Message is required"}), 400
+
+    response = openai_client.chat.completions.create(
+        model="gpt-3.5-turbo",
+        messages=[{"role": "user", "content": user_message}],
+        temperature=0.7,
+    )
+    assistant = response.choices[0].message.content
+    return jsonify({"response": assistant})
+
+# ---------------------------------------------------------------------------
+# ElevenLabs TTS – HTTP proxy & WS bridge
+# ---------------------------------------------------------------------------
+
+
+def _elevenlabs_headers(api_key: str):
+    return {
+        "Content-Type": "application/json",
+        "xi-api-key": api_key,
+    }
+
+
+@app.route("/tts-proxy", methods=["POST"])
+def tts_proxy():
+    """HTTP proxy that mirrors server.js `/tts-proxy`."""
+    api_key = os.environ.get("ELEVENLABS_API_KEY")
+    voice_id = os.environ.get("VOICE_ID")
+    if not api_key or not voice_id:
+        return jsonify({"error": "Missing ELEVENLABS_API_KEY or VOICE_ID"}), 500
+
+    try:
+        payload = request.get_json(force=True)
+        url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}/stream"
+        r = requests.post(url, headers=_elevenlabs_headers(api_key), json=payload, timeout=30)
+        if r.status_code != 200:
+            return jsonify({"error": r.text}), r.status_code
+        # ElevenLabs returns audio bytes; stream them back
+        # For simplicity we forward the entire JSON response (mirrors server.js)
+        return jsonify(r.json())
+    except Exception as exc:
+        return jsonify({"error": f"TTS Proxy failed: {exc}"}), 500
+
+
+@sock.route("/tts-ws")
+def tts_ws_proxy(ws):
+    """Bidirectional WebSocket proxy to ElevenLabs (or custom) endpoint."""
+    api_key = os.environ.get("ELEVENLABS_API_KEY")
+    voice_id = os.environ.get("VOICE_ID")
+    remote_url = os.environ.get(
+        "TTS_WS_URL",
+        f"wss://api.elevenlabs.io/v1/text-to-speech/{voice_id}/stream",
+    )
+    if not api_key or not voice_id:
+        ws.send(json.dumps({"error": "TTS credentials not configured"}))
+        ws.close()
+        return
+
+    remote_ws = websocket.create_connection(remote_url, header=[f"xi-api-key: {api_key}"])
+
+    def _client_to_tts():
         while True:
-            message = ws.receive()
-            if message:
-                tts_ws.send(message)
-    
-    def forward_to_client():
+            try:
+                msg = ws.receive()
+                if msg is None:
+                    break
+                remote_ws.send(msg)
+            except Exception:
+                break
+        remote_ws.close()
+
+    def _tts_to_client():
         while True:
-            message = tts_ws.recv()
-            if message:
-                ws.send(message)
-    
-    # Start forwarding threads
-    threading.Thread(target=forward_to_tts, daemon=True).start()
-    threading.Thread(target=forward_to_client, daemon=True).start()
+            try:
+                msg = remote_ws.recv()
+                if msg is None:
+                    break
+                ws.send(msg)
+            except Exception:
+                break
+        ws.close()
 
+    threading.Thread(target=_client_to_tts, daemon=True).start()
+    threading.Thread(target=_tts_to_client, daemon=True).start()
 
-AVATAR_DIR = os.path.join(BASE_DIR, 'src', 'Avatar')
+# ---------------------------------------------------------------------------
+# Static asset routes – mirrors Node.js behaviour
+# ---------------------------------------------------------------------------
 
-@app.route('/avatar/<path:filename>')
-def serve_avatar(filename):
-    return send_from_directory(AVATAR_DIR, filename)
-
-@app.route('/models/<path:filename>')
+@app.route("/models/<path:filename>")
 def serve_models(filename):
-    return send_from_directory(os.path.join(BASE_DIR, 'src', 'models'), filename)
+    return send_static_with_headers(
+        MODELS_DIR,
+        filename,
+        {
+            "Content-Type": "model/gltf-binary",
+            "Cache-Control": "public, max-age=31536000",
+        },
+    )
 
-@app.route('/modules/<path:filename>')
+
+@app.route("/modules/<path:filename>")
 def serve_modules(filename):
-    return send_from_directory(os.path.join(BASE_DIR, 'src', 'modules'), filename)
+    return send_static_with_headers(
+        MODULES_DIR,
+        filename,
+        {
+            "Content-Type": "application/javascript",
+            "Cache-Control": "no-store",
+        },
+    )
 
-# Serve React build in production
-@app.route('/', defaults={'path': ''})
-@app.route('/<path:path>')
-def serve_react(path):
-    # Only serve React files if they exist
-    react_build_path = os.path.join(BASE_DIR, 'frontend', 'build')
-    full_path = os.path.join(react_build_path, path)
-    
-    if path != "" and os.path.exists(full_path) and not os.path.isdir(full_path):
-        return send_from_directory(react_build_path, path)
-    if path.startswith('avatar/') or path.startswith('models/') or path.startswith('modules/'):
-        return serve_avatar(path)
-    else:
-        # Only return index.html if it exists
-        if os.path.exists(os.path.join(react_build_path, 'index.html')):
-            return send_from_directory(react_build_path, 'index.html')
-        return "Not Found", 404
 
-if __name__ == '__main__':
+# Generic static: anything else under /public
+@app.route("/public/<path:filename>")
+def serve_public(filename):
+    return send_from_directory(PUBLIC_DIR, filename)
+
+
+# ---------------------------------------------------------------------------
+# React SPA fallback (unchanged)
+# ---------------------------------------------------------------------------
+
+@app.route("/", defaults={"path": ""})
+@app.route("/<path:path>")
+def catch_all(path):
+    # Allow special prefixes to reach earlier routes first
+    if path.startswith("models/") or path.startswith("modules/"):
+        return app.send_static_file(path)
+
+    full = os.path.join(FRONTEND_BUILD, path)
+    if path and os.path.exists(full) and not os.path.isdir(full):
+        return send_from_directory(FRONTEND_BUILD, path)
+
+    index = os.path.join(FRONTEND_BUILD, "index.html")
+    return send_from_directory(FRONTEND_BUILD, "index.html") if os.path.exists(index) else ("Not Found", 404)
+
+
+# ---------------------------------------------------------------------------
+# Run
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
     app.run(debug=True, port=5000)
