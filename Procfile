@@ -1,1 +1,1 @@
-web: npm run start:all
+web: gunicorn backend.app:app --log-file -
